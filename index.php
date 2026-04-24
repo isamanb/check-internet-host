@@ -1,382 +1,442 @@
 <?php
 declare(strict_types=1);
 
-/**
- * Internet Connectivity Tester for cPanel Hosts
- * Targets:
- * - Google
- * - GitHub
- * - Facebook
- * - Bale Docs
- * - Bale API Host
- *
- * نکته:
- * این اسکریپت فقط اتصال شبکه را بررسی می‌کند.
- * اگر یک مقصد fail شود، همیشه به معنی قطع بودن اینترنت نیست؛
- * ممکن است آن دامنه از سمت هاست، فایروال، DNS یا provider محدود شده باشد.
- */
-
 ini_set('display_errors', '1');
 error_reporting(E_ALL);
 date_default_timezone_set('Asia/Tehran');
 
+$reverseToken = 'CHANGE_THIS_TOKEN';
+
 $targets = [
-    [
-        'name' => 'Google',
-        'host' => 'www.google.com',
-        'url'  => 'https://www.google.com/',
-        'port' => 443,
-    ],
-    [
-        'name' => 'GitHub',
-        'host' => 'github.com',
-        'url'  => 'https://github.com/',
-        'port' => 443,
-    ],
-    [
-        'name' => 'Facebook',
-        'host' => 'www.facebook.com',
-        'url'  => 'https://www.facebook.com/',
-        'port' => 443,
-    ],
-    [
-        'name' => 'Bale Docs',
-        'host' => 'docs.bale.ai',
-        'url'  => 'https://docs.bale.ai/',
-        'port' => 443,
-    ],
-    [
-        'name' => 'Bale API Host',
-        'host' => 'tapi.bale.ai',
-        'url'  => 'https://tapi.bale.ai/',
-        'port' => 443,
-    ],
+    ['id'=>'google', 'name'=>'Google', 'host'=>'www.google.com', 'url'=>'https://www.google.com/', 'port'=>443],
+    ['id'=>'github', 'name'=>'GitHub', 'host'=>'github.com', 'url'=>'https://github.com/', 'port'=>443],
+    ['id'=>'facebook', 'name'=>'Facebook', 'host'=>'www.facebook.com', 'url'=>'https://www.facebook.com/', 'port'=>443],
+    ['id'=>'bale_docs', 'name'=>'Bale Docs', 'host'=>'docs.bale.ai', 'url'=>'https://docs.bale.ai/', 'port'=>443],
+    ['id'=>'bale_api', 'name'=>'Bale API', 'host'=>'tapi.bale.ai', 'url'=>'https://tapi.bale.ai/', 'port'=>443],
+    ['id'=>'vps1', 'name'=>'VPS 1 SSH', 'host'=>'107.175.193.137', 'url'=>null, 'port'=>22],
+    ['id'=>'vps2', 'name'=>'VPS 2 SSH', 'host'=>'5.175.136.3', 'url'=>null, 'port'=>22],
 ];
 
-function h(string $value): string
-{
-    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+function findTarget(array $targets, string $id): ?array {
+    foreach ($targets as $t) {
+        if ($t['id'] === $id) return $t;
+    }
+    return null;
 }
 
-function boolBadge(bool $ok): string
-{
-    return $ok
-        ? '<span class="badge ok">OK</span>'
-        : '<span class="badge fail">FAIL</span>';
-}
+function dnsCheck(string $host): array {
+    if (filter_var($host, FILTER_VALIDATE_IP)) {
+        return ['ok'=>true, 'msg'=>'IP - DNS skipped', 'time'=>0];
+    }
 
-function dnsResolve(string $host): array
-{
     $start = microtime(true);
     $ip = gethostbyname($host);
-    $timeMs = (int) round((microtime(true) - $start) * 1000);
-
-    $ok = ($ip !== $host);
+    $time = round((microtime(true) - $start) * 1000);
 
     return [
-        'ok' => $ok,
-        'message' => $ok ? "Resolved to {$ip}" : 'DNS resolution failed',
-        'time_ms' => $timeMs,
-        'ip' => $ok ? $ip : null,
+        'ok'=>$ip !== $host,
+        'msg'=>$ip !== $host ? "Resolved: $ip" : 'DNS FAIL',
+        'time'=>$time
     ];
 }
 
-function tcpConnect(string $host, int $port = 443, int $timeout = 8): array
-{
-    $errno = 0;
-    $errstr = '';
-
+function tcpCheck(string $host, int $port, int $timeout = 3): array {
     $start = microtime(true);
     $fp = @fsockopen($host, $port, $errno, $errstr, $timeout);
-    $timeMs = (int) round((microtime(true) - $start) * 1000);
+    $time = round((microtime(true) - $start) * 1000);
 
     if ($fp) {
         fclose($fp);
-        return [
-            'ok' => true,
-            'message' => "TCP connection to {$host}:{$port} succeeded",
-            'time_ms' => $timeMs,
-        ];
+        return ['ok'=>true, 'msg'=>'Connected', 'time'=>$time];
+    }
+
+    return ['ok'=>false, 'msg'=>"Error $errno - $errstr", 'time'=>$time];
+}
+
+function latencyCheck(string $host, int $port): array {
+    $tries = 2;
+    $times = [];
+    $success = 0;
+
+    for ($i = 0; $i < $tries; $i++) {
+        $r = tcpCheck($host, $port, 2);
+        if ($r['ok']) {
+            $success++;
+            $times[] = $r['time'];
+        }
+    }
+
+    if (!$times) {
+        return ['ok'=>false, 'msg'=>"0/$tries successful", 'avg'=>null, 'min'=>null, 'max'=>null];
     }
 
     return [
-        'ok' => false,
-        'message' => "TCP failed ({$errno}) {$errstr}",
-        'time_ms' => $timeMs,
+        'ok'=>true,
+        'msg'=>"$success/$tries successful",
+        'avg'=>round(array_sum($times) / count($times), 2),
+        'min'=>min($times),
+        'max'=>max($times),
     ];
 }
 
-function httpCheck(string $url, int $timeout = 12): array
-{
+function httpCheck(?string $url): array {
+    if (!$url) return ['ok'=>false, 'msg'=>'Skipped', 'time'=>0];
+
     if (!function_exists('curl_init')) {
-        return [
-            'ok' => false,
-            'message' => 'cURL extension is not enabled on this host',
-            'time_ms' => 0,
-            'http_code' => null,
-            'final_url' => null,
-        ];
+        return ['ok'=>false, 'msg'=>'cURL disabled', 'time'=>0];
     }
 
-    $ch = curl_init();
+    $ch = curl_init($url);
 
     curl_setopt_array($ch, [
-        CURLOPT_URL => $url,
-        CURLOPT_NOBODY => true,              // HEAD request
+        CURLOPT_NOBODY => true,
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS => 5,
-        CURLOPT_CONNECTTIMEOUT => $timeout,
-        CURLOPT_TIMEOUT => $timeout,
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_SSL_VERIFYHOST => 2,
-        CURLOPT_USERAGENT => 'HostConnectivityChecker/1.0',
-        CURLOPT_HEADER => false,
+        CURLOPT_MAXREDIRS => 3,
+        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_TIMEOUT => 5,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_USERAGENT => 'LiveHostChecker/1.0',
     ]);
 
     $start = microtime(true);
     curl_exec($ch);
-    $timeMs = (int) round((microtime(true) - $start) * 1000);
+    $time = round((microtime(true) - $start) * 1000);
 
-    $errNo = curl_errno($ch);
+    $err = curl_errno($ch);
     $errMsg = curl_error($ch);
-    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $finalUrl = (string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
     curl_close($ch);
 
-    if ($errNo !== 0) {
-        return [
-            'ok' => false,
-            'message' => "cURL error ({$errNo}) {$errMsg}",
-            'time_ms' => $timeMs,
-            'http_code' => null,
-            'final_url' => $finalUrl ?: null,
-        ];
+    if ($err) {
+        return ['ok'=>false, 'msg'=>"cURL $err - $errMsg", 'time'=>$time];
     }
 
-    $ok = ($httpCode >= 200 && $httpCode < 500);
-    // 403 / 405 / 301 / 302 هم برای تست اتصال می‌تواند نشانه reachable بودن باشد.
-
     return [
-        'ok' => $ok,
-        'message' => "HTTP response code: {$httpCode}",
-        'time_ms' => $timeMs,
-        'http_code' => $httpCode,
-        'final_url' => $finalUrl ?: null,
+        'ok'=>$code >= 200 && $code < 500,
+        'msg'=>"HTTP $code",
+        'time'=>$time
     ];
 }
 
-function testTarget(array $target): array
-{
-    $dns = dnsResolve($target['host']);
-    $tcp = tcpConnect($target['host'], (int)$target['port']);
+function canExec(): bool {
+    if (!function_exists('shell_exec')) return false;
+    $disabled = ini_get('disable_functions');
+    if (!$disabled) return true;
+    return stripos($disabled, 'shell_exec') === false;
+}
+
+function tracerouteCheck(string $host): array {
+    if (!canExec()) {
+        return ['ok'=>false, 'msg'=>'shell_exec disabled', 'output'=>''];
+    }
+
+    $safeHost = escapeshellarg($host);
+    $cmd = stripos(PHP_OS, 'WIN') === 0
+        ? "tracert -d -h 5 $safeHost"
+        : "timeout 8 traceroute -n -m 5 $safeHost 2>&1";
+
+    $output = shell_exec($cmd);
+
+    return [
+        'ok'=>!empty($output),
+        'msg'=>!empty($output) ? 'Traceroute executed' : 'Traceroute failed or not installed',
+        'output'=>trim((string)$output),
+    ];
+}
+
+/*
+|--------------------------------------------------------------------------
+| Reverse endpoint
+|--------------------------------------------------------------------------
+*/
+
+if (isset($_GET['reverse'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    if (($_GET['token'] ?? '') !== $reverseToken) {
+        http_response_code(403);
+        echo json_encode(['ok'=>false, 'message'=>'Invalid token'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    echo json_encode([
+        'ok'=>true,
+        'message'=>'Reverse connection reached this host successfully',
+        'time'=>date('Y-m-d H:i:s'),
+        'remote_ip'=>$_SERVER['REMOTE_ADDR'] ?? null,
+        'server_ip'=>$_SERVER['SERVER_ADDR'] ?? null,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/*
+|--------------------------------------------------------------------------
+| AJAX test endpoint
+|--------------------------------------------------------------------------
+*/
+
+if (isset($_GET['ajax'])) {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (string)($_GET['id'] ?? '');
+    $trace = isset($_GET['trace']) && $_GET['trace'] === '1';
+
+    $target = findTarget($targets, $id);
+
+    if (!$target) {
+        http_response_code(404);
+        echo json_encode(['ok'=>false, 'message'=>'Target not found']);
+        exit;
+    }
+
+    $dns = dnsCheck($target['host']);
+    $tcp = tcpCheck($target['host'], (int)$target['port']);
+    $latency = latencyCheck($target['host'], (int)$target['port']);
     $http = httpCheck($target['url']);
 
     $overall = $dns['ok'] && ($tcp['ok'] || $http['ok']);
 
-    return [
-        'target' => $target,
-        'dns' => $dns,
-        'tcp' => $tcp,
-        'http' => $http,
-        'overall' => $overall,
+    $result = [
+        'id'=>$target['id'],
+        'name'=>$target['name'],
+        'host'=>$target['host'],
+        'port'=>$target['port'],
+        'dns'=>$dns,
+        'tcp'=>$tcp,
+        'latency'=>$latency,
+        'http'=>$http,
+        'overall'=>$overall,
     ];
-}
 
-$results = [];
-foreach ($targets as $target) {
-    $results[] = testTarget($target);
-}
-
-$successCount = 0;
-foreach ($results as $row) {
-    if ($row['overall']) {
-        $successCount++;
+    if ($trace) {
+        $result['trace'] = tracerouteCheck($target['host']);
     }
+
+    echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
-$internetLikelyOk = $successCount >= 2;
+function h($v): string {
+    return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+}
+
+$scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+$currentUrl = $scheme . '://' . ($_SERVER['HTTP_HOST'] ?? 'your-domain.com') . ($_SERVER['PHP_SELF'] ?? '/check.php');
+$reverseUrl = $currentUrl . '?reverse=1&token=' . urlencode($reverseToken);
+
 ?>
 <!doctype html>
 <html lang="fa" dir="rtl">
 <head>
-    <meta charset="utf-8">
-    <title>تست اتصال اینترنت هاست</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body{
-            font-family: Tahoma, Arial, sans-serif;
-            background:#f5f7fb;
-            color:#222;
-            margin:0;
-            padding:20px;
-        }
-        .container{
-            max-width:1100px;
-            margin:0 auto;
-        }
-        .card{
-            background:#fff;
-            border-radius:14px;
-            box-shadow:0 4px 18px rgba(0,0,0,.08);
-            padding:18px;
-            margin-bottom:20px;
-        }
-        h1,h2,h3{
-            margin-top:0;
-        }
-        .summary{
-            font-size:18px;
-            line-height:1.9;
-        }
-        .ok-text{color:#0a8a42;font-weight:bold;}
-        .fail-text{color:#c62828;font-weight:bold;}
-        table{
-            width:100%;
-            border-collapse:collapse;
-            margin-top:10px;
-            background:#fff;
-        }
-        th, td{
-            border:1px solid #e5e7eb;
-            padding:10px;
-            text-align:right;
-            vertical-align:top;
-            font-size:14px;
-        }
-        th{
-            background:#f0f4f8;
-        }
-        .badge{
-            display:inline-block;
-            padding:4px 10px;
-            border-radius:999px;
-            color:#fff;
-            font-size:12px;
-            font-weight:bold;
-        }
-        .badge.ok{background:#16a34a;}
-        .badge.fail{background:#dc2626;}
-        .muted{
-            color:#666;
-            font-size:13px;
-        }
-        code{
-            background:#eef2f7;
-            padding:2px 6px;
-            border-radius:6px;
-            direction:ltr;
-            display:inline-block;
-        }
-    </style>
+<meta charset="utf-8">
+<title>تست لایو اتصال هاست</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:tahoma,arial;background:#f4f6fa;color:#222;padding:20px;line-height:1.8}
+.card{background:#fff;padding:18px;border-radius:14px;margin-bottom:20px;box-shadow:0 3px 14px rgba(0,0,0,.07)}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+td,th{border:1px solid #ddd;padding:9px;vertical-align:top;font-size:14px}
+th{background:#eef1f5}
+.badge{display:inline-block;padding:3px 10px;border-radius:99px;color:#fff;font-size:12px;font-weight:bold}
+.ok{background:#16a34a}
+.fail{background:#dc2626}
+.wait{background:#64748b}
+.run{background:#2563eb}
+code{direction:ltr;display:inline-block;background:#eef2f7;padding:2px 6px;border-radius:6px}
+pre{direction:ltr;text-align:left;background:#111827;color:#e5e7eb;padding:12px;border-radius:10px;overflow:auto;font-size:13px}
+.small{font-size:13px;color:#666}
+button{padding:9px 14px;border:0;border-radius:8px;background:#2563eb;color:white;cursor:pointer}
+button:hover{background:#1d4ed8}
+.summary{font-size:18px;font-weight:bold}
+</style>
 </head>
 <body>
-<div class="container">
 
-    <div class="card">
-        <h1>تست اتصال اینترنت هاست</h1>
-        <div class="summary">
-            زمان اجرا:
-            <strong><?php echo h(date('Y-m-d H:i:s')); ?></strong>
-            <br><br>
+<div class="card">
+    <h2>تست لایو اتصال هاست</h2>
 
-            نتیجه کلی:
-            <?php if ($internetLikelyOk): ?>
-                <span class="ok-text">به احتمال زیاد هاست به اینترنت دسترسی دارد.</span>
-            <?php else: ?>
-                <span class="fail-text">اتصال اینترنت هاست ضعیف است یا برقرار نیست.</span>
-            <?php endif; ?>
+    <p class="summary" id="summary">در حال آماده‌سازی تست‌ها...</p>
 
-            <br><br>
-            تعداد مقصدهای موفق:
-            <strong><?php echo (int)$successCount; ?></strong>
-            از
-            <strong><?php echo count($results); ?></strong>
-        </div>
-    </div>
+    <button onclick="runAll(false)">اجرای تست سریع</button>
+    <button onclick="runAll(true)">اجرای تست همراه Traceroute</button>
 
-    <div class="card">
-        <h2>جزئیات بررسی</h2>
+    <p class="small">
+        تست سریع بلافاصله صفحه را نشان می‌دهد و نتیجه هر مقصد جداگانه داخل جدول پر می‌شود.
+    </p>
+</div>
 
-        <table>
-            <thead>
+<div class="card">
+    <h2>نتایج زنده</h2>
+
+    <table>
+        <thead>
             <tr>
-                <th>سرویس</th>
+                <th>مقصد</th>
                 <th>DNS</th>
                 <th>TCP</th>
-                <th>HTTP/HTTPS</th>
-                <th>وضعیت نهایی</th>
+                <th>Latency</th>
+                <th>HTTP</th>
+                <th>نتیجه</th>
             </tr>
-            </thead>
-            <tbody>
-            <?php foreach ($results as $item): ?>
-                <tr>
-                    <td>
-                        <strong><?php echo h($item['target']['name']); ?></strong><br>
-                        <span class="muted"><?php echo h($item['target']['host']); ?></span><br>
-                        <span class="muted"><?php echo h($item['target']['url']); ?></span>
-                    </td>
-                    <td>
-                        <?php echo boolBadge($item['dns']['ok']); ?><br>
-                        <?php echo h($item['dns']['message']); ?><br>
-                        <span class="muted"><?php echo (int)$item['dns']['time_ms']; ?> ms</span>
-                    </td>
-                    <td>
-                        <?php echo boolBadge($item['tcp']['ok']); ?><br>
-                        <?php echo h($item['tcp']['message']); ?><br>
-                        <span class="muted"><?php echo (int)$item['tcp']['time_ms']; ?> ms</span>
-                    </td>
-                    <td>
-                        <?php echo boolBadge($item['http']['ok']); ?><br>
-                        <?php echo h($item['http']['message']); ?><br>
-                        <?php if (!empty($item['http']['final_url'])): ?>
-                            <span class="muted">Final URL: <?php echo h($item['http']['final_url']); ?></span><br>
-                        <?php endif; ?>
-                        <span class="muted"><?php echo (int)$item['http']['time_ms']; ?> ms</span>
-                    </td>
-                    <td>
-                        <?php echo boolBadge($item['overall']); ?>
-                    </td>
-                </tr>
-            <?php endforeach; ?>
-            </tbody>
-        </table>
-
-        <p class="muted" style="margin-top:15px;">
-            توجه: Fail شدن Facebook یا بعضی سرویس‌ها لزوماً به معنی نداشتن اینترنت نیست؛
-            بعضی هاست‌ها، دیتاسنترها یا فایروال‌ها برخی دامنه‌ها را محدود می‌کنند.
-        </p>
-    </div>
-
-    <div class="card">
-        <h2>اطلاعات محیط PHP</h2>
-        <table>
-            <tbody>
-            <tr>
-                <th>PHP Version</th>
-                <td><?php echo h(PHP_VERSION); ?></td>
+        </thead>
+        <tbody>
+        <?php foreach ($targets as $t): ?>
+            <tr id="row-<?php echo h($t['id']); ?>">
+                <td>
+                    <strong><?php echo h($t['name']); ?></strong><br>
+                    <code><?php echo h($t['host']); ?>:<?php echo (int)$t['port']; ?></code>
+                </td>
+                <td id="dns-<?php echo h($t['id']); ?>"><span class="badge wait">WAIT</span></td>
+                <td id="tcp-<?php echo h($t['id']); ?>"><span class="badge wait">WAIT</span></td>
+                <td id="latency-<?php echo h($t['id']); ?>"><span class="badge wait">WAIT</span></td>
+                <td id="http-<?php echo h($t['id']); ?>"><span class="badge wait">WAIT</span></td>
+                <td id="overall-<?php echo h($t['id']); ?>"><span class="badge wait">WAIT</span></td>
             </tr>
-            <tr>
-                <th>cURL enabled</th>
-                <td><?php echo function_exists('curl_init') ? 'Yes' : 'No'; ?></td>
+            <tr id="trace-row-<?php echo h($t['id']); ?>" style="display:none">
+                <td colspan="6">
+                    <strong>Traceroute <?php echo h($t['name']); ?></strong>
+                    <pre id="trace-<?php echo h($t['id']); ?>"></pre>
+                </td>
             </tr>
-            <tr>
-                <th>OpenSSL</th>
-                <td><?php echo defined('OPENSSL_VERSION_TEXT') ? h(OPENSSL_VERSION_TEXT) : 'Unknown'; ?></td>
-            </tr>
-            <tr>
-                <th>Server IP</th>
-                <td><?php echo h($_SERVER['SERVER_ADDR'] ?? 'Unknown'); ?></td>
-            </tr>
-            <tr>
-                <th>Server Name</th>
-                <td><?php echo h($_SERVER['SERVER_NAME'] ?? 'Unknown'); ?></td>
-            </tr>
-            </tbody>
-        </table>
-    </div>
-
+        <?php endforeach; ?>
+        </tbody>
+    </table>
 </div>
+
+<div class="card">
+    <h2>Reverse Test: تست VPS به هاست ایران</h2>
+
+    <p>روی VPS این دستور را بزن:</p>
+
+    <pre>curl "<?php echo h($reverseUrl); ?>"</pre>
+
+    <p>اگر خروجی شامل <code>"ok": true</code> بود، یعنی VPS به هاست ایران وصل می‌شود.</p>
+</div>
+
+<script>
+const targets = <?php echo json_encode($targets, JSON_UNESCAPED_UNICODE); ?>;
+
+function badge(ok, text) {
+    return `<span class="badge ${ok ? 'ok' : 'fail'}">${text}</span>`;
+}
+
+function running() {
+    return `<span class="badge run">RUNNING</span>`;
+}
+
+function waiting() {
+    return `<span class="badge wait">WAIT</span>`;
+}
+
+function setCell(id, part, html) {
+    document.getElementById(part + '-' + id).innerHTML = html;
+}
+
+function ms(t) {
+    return `<br><span class="small">${t} ms</span>`;
+}
+
+async function testOne(target, trace = false) {
+    const id = target.id;
+
+    setCell(id, 'dns', running());
+    setCell(id, 'tcp', running());
+    setCell(id, 'latency', running());
+    setCell(id, 'http', running());
+    setCell(id, 'overall', running());
+
+    const url = `?ajax=1&id=${encodeURIComponent(id)}&trace=${trace ? '1' : '0'}`;
+
+    try {
+        const res = await fetch(url, {cache: 'no-store'});
+        const data = await res.json();
+
+        setCell(id, 'dns',
+            badge(data.dns.ok, data.dns.ok ? 'OK' : 'FAIL') +
+            '<br>' + data.dns.msg + ms(data.dns.time)
+        );
+
+        setCell(id, 'tcp',
+            badge(data.tcp.ok, data.tcp.ok ? 'OK' : 'FAIL') +
+            '<br>' + data.tcp.msg + ms(data.tcp.time)
+        );
+
+        let latencyText = data.latency.msg;
+        if (data.latency.ok) {
+            latencyText += `<br>Avg: ${data.latency.avg} ms<br>Min: ${data.latency.min} ms<br>Max: ${data.latency.max} ms`;
+        }
+
+        setCell(id, 'latency',
+            badge(data.latency.ok, data.latency.ok ? 'OK' : 'FAIL') +
+            '<br>' + latencyText
+        );
+
+        setCell(id, 'http',
+            badge(data.http.ok, data.http.ok ? 'OK' : 'FAIL') +
+            '<br>' + data.http.msg + ms(data.http.time)
+        );
+
+        setCell(id, 'overall',
+            badge(data.overall, data.overall ? 'OK' : 'FAIL')
+        );
+
+        if (trace && data.trace) {
+            document.getElementById('trace-row-' + id).style.display = '';
+            document.getElementById('trace-' + id).textContent =
+                data.trace.msg + "\n\n" + (data.trace.output || '');
+        }
+
+        return data.overall === true;
+
+    } catch (e) {
+        setCell(id, 'dns', badge(false, 'ERROR'));
+        setCell(id, 'tcp', badge(false, 'ERROR'));
+        setCell(id, 'latency', badge(false, 'ERROR'));
+        setCell(id, 'http', badge(false, 'ERROR'));
+        setCell(id, 'overall', badge(false, 'ERROR'));
+        return false;
+    }
+}
+
+async function runAll(trace = false) {
+    let success = 0;
+    let done = 0;
+
+    document.getElementById('summary').textContent = 'تست‌ها شروع شدند...';
+
+    for (const t of targets) {
+        setCell(t.id, 'dns', waiting());
+        setCell(t.id, 'tcp', waiting());
+        setCell(t.id, 'latency', waiting());
+        setCell(t.id, 'http', waiting());
+        setCell(t.id, 'overall', waiting());
+        document.getElementById('trace-row-' + t.id).style.display = 'none';
+    }
+
+    const promises = targets.map(async (t) => {
+        const ok = await testOne(t, trace);
+        done++;
+        if (ok) success++;
+
+        document.getElementById('summary').textContent =
+            `انجام شده: ${done} از ${targets.length} | موفق: ${success}`;
+
+        return ok;
+    });
+
+    await Promise.all(promises);
+
+    document.getElementById('summary').textContent =
+        `پایان تست | موفق: ${success} از ${targets.length}`;
+}
+
+window.addEventListener('load', () => {
+    runAll(false);
+});
+</script>
+
 </body>
 </html>
