@@ -12,9 +12,7 @@ $targets = [
     ['id'=>'github', 'name'=>'GitHub', 'host'=>'github.com', 'url'=>'https://github.com/', 'port'=>443],
     ['id'=>'facebook', 'name'=>'Facebook', 'host'=>'www.facebook.com', 'url'=>'https://www.facebook.com/', 'port'=>443],
     ['id'=>'bale_docs', 'name'=>'Bale Docs', 'host'=>'docs.bale.ai', 'url'=>'https://docs.bale.ai/', 'port'=>443],
-    ['id'=>'bale_api', 'name'=>'Bale API', 'host'=>'tapi.bale.ai', 'url'=>'https://tapi.bale.ai/', 'port'=>443],
-    ['id'=>'vps1', 'name'=>'VPS 1 SSH', 'host'=>'107.175.193.137', 'url'=>null, 'port'=>22],
-    ['id'=>'vps2', 'name'=>'VPS 2 SSH', 'host'=>'5.175.136.3', 'url'=>null, 'port'=>22],
+    ['id'=>'bale_api', 'name'=>'Bale API', 'host'=>'tapi.bale.ai', 'url'=>'https://tapi.bale.ai/', 'port'=>443]
 ];
 
 function findTarget(array $targets, string $id): ?array {
