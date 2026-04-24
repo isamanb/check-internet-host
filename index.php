@@ -235,7 +235,8 @@ $reverseUrl = $currentUrl . '?reverse=1&token=' . urlencode($reverseToken);
 <title>تست لایو اتصال هاست</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body{font-family:tahoma,arial;background:#f4f6fa;color:#222;padding:20px;line-height:1.8}
+@font-face {font-family: 'Shabnam';src: url('https://web.bale.ai/static/font/Shabnam.ff80c11a.woff2') format('woff2');font-weight: 400;}
+body{font-family:'Shabnam',tahoma,arial;background:#f4f6fa;color:#222;padding:20px;line-height:1.8}
 .card{background:#fff;padding:18px;border-radius:14px;margin-bottom:20px;box-shadow:0 3px 14px rgba(0,0,0,.07)}
 table{width:100%;border-collapse:collapse;margin-top:12px}
 td,th{border:1px solid #ddd;padding:9px;vertical-align:top;font-size:14px}
